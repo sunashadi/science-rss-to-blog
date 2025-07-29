@@ -1,98 +1,134 @@
+import os
 import feedparser
 import requests
 import openai
-import os
 from bs4 import BeautifulSoup
 from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont
+from io import BytesIO
 import re
 
-# Ambil API key dari Secrets GitHub
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# === Konfigurasi ===
+RSS_FEED_URL = "https://www.sciencedaily.com/rss/all.xml"
+IMG_DIR = "static/images"
+POST_DIR = "content/posts"
+LEONARDO_API_KEY = os.getenv("LEONARDO_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai.api_key = OPENAI_API_KEY
 
-# Ambil isi lengkap dari artikel ScienceDaily
-def fetch_article(link):
-    try:
-        res = requests.get(link)
-        soup = BeautifulSoup(res.text, "html.parser")
-        content_div = soup.find("div", {"id": "text"})
-        if not content_div:
-            print("Konten utama tidak ditemukan")
-            return ""
-        paragraphs = content_div.find_all("p")
-        full_text = "\n\n".join(p.get_text().strip() for p in paragraphs)
-        return full_text
-    except Exception as e:
-        print(f"Gagal ambil isi artikel: {e}")
-        return ""
+# === Persiapan direktori ===
+os.makedirs(IMG_DIR, exist_ok=True)
+os.makedirs(POST_DIR, exist_ok=True)
 
-# Terjemahkan dan rewrite dengan gaya yang mudah dibaca
-def translate_and_rewrite(text):
+# === Fungsi untuk membersihkan slug judul ===
+def slugify(text):
+    return re.sub(r'[^a-zA-Z0-9-]', '-', text.lower()).strip('-')
+
+# === Fungsi untuk rewrite artikel ===
+def rewrite_article(original_text):
     prompt = f"""
-    Terjemahkan dan tulis ulang artikel berikut ke dalam Bahasa Indonesia. 
-    Gunakan bahasa yang mudah dipahami dan cocok untuk pembaca blog.
+    Tulis ulang artikel berikut ini dengan ketentuan:
+    
+    1. Artikel minimal 17 paragraf dalam bahasa Indonesia dengan gaya bahasa yang mudah dipahami oleh orang awam, cocok untuk pembaca blog (humanize) sesuai SEO!
+    2. Sesuaikan penulisan hurufnya sesuai Ejaan Yang Disempurnakan (EYD)!
+    3. Artikel menggunakan kalimat aktif dan pendek (maksimal 20 kata per kalimat).
+    4. Artikel paragraf tidak lebih dari 4 kalimat.
+    5. Artikel mengandung kata transisi seperti “selain itu”, “karena itu”, “di sisi lain”, “namun”, dan sejenisnya di seluruh artikel.
+    6. Artikel menghindari kalimat pasif secara berlebihan.
+    7. Artikel menjelaskan setiap istilah atau konsep sulit dengan cara sederhana.
+    8. Artikel mengandung struktur logis: pembuka, isi utama, dan penutup.
+    9. Tuliskan sumber jurnal dan tanggal publikasi dalam bentuk paragraf sesuai SEO! 
+    10. Artikel memiliki tulisan dengan gaya human-friendly, tidak kaku, seolah berbicara langsung kepada pembaca. 
+    11. Buatkan dalam bentuk paragraf! Buatkan judul yang menarik sesuai SEO! 
+    12. Buatkan 3 sub judul yang menarik dan relevan di dalam badan artikel yang dibuat sesuai SEO!
+    13. Buatkan Resume dan meta-deskripsi dalam kalimat pasif sesuai SEO! 
+    14. Tuliskan kalimat pendek yang lebih menarik daripada judul untuk keterangan gambar!  
+    15. Buatkan 5 frasa kata kunci utama yang unggul sesuai SEO!
 
     Artikel:
-    {text}
+    {original_text}
     """
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7
+    )
+    return response.choices[0].message.content.strip()
+
+# === Fungsi buat gambar ilustrasi otomatis dari Leonardo + Logo + Caption ===
+def generate_image(prompt, slug, caption):
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=2000,
-            temperature=0.7,
+        # Request ke Leonardo
+        res = requests.post(
+            "https://cloud.leonardo.ai/api/rest/v1/generations",
+            headers={
+                "Authorization": f"Bearer {LEONARDO_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "prompt": prompt + ", modern, realistic, landscape",
+                "width": 1152,
+                "height": 768,
+                "num_images": 1,
+                "modelId": "realistic-vision-v5.1"
+            }
         )
-        return response["choices"][0]["message"]["content"]
+        res.raise_for_status()
+        image_url = res.json()["generations_by_pk"]["generated_images"][0]["url"]
+
+        # Download dan buka gambar
+        image_data = requests.get(image_url).content
+        image = Image.open(BytesIO(image_data)).convert("RGBA")
+
+        # Tambahkan logo
+        logo = Image.open(requests.get("https://i.imgur.com/SppIZHH.png", stream=True).raw).convert("RGBA")
+        logo = logo.resize((175, 158))
+        image.paste(logo, (image.width - logo.width - 20, image.height - logo.height - 20), logo)
+
+        # Tambahkan teks caption
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+        draw.text((30, image.height - 60), caption, font=font, fill="white")
+
+        # Simpan
+        image_path = f"{IMG_DIR}/{slug}.png"
+        image.save(image_path, "PNG")
+        return f"/images/{slug}.png"
     except Exception as e:
-        print(f"Gagal translate/rewrite: {e}")
+        print(f"Gagal buat gambar: {e}")
         return ""
 
-# Simpan artikel sebagai file Markdown
-def save_as_markdown(title, summary, content):
-    date = datetime.now().isoformat()
-    filename = re.sub(r'[^\w\-]', '-', title.lower())[:50] + ".md"
-    path = f"content/posts/{filename}"
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(f"---\n")
-            f.write(f"title: \"{title}\"\n")
-            f.write(f"date: {date}\n")
-            f.write(f"draft: false\n")
-            f.write(f"summary: \"{summary.strip()}\"\n")
-            f.write(f"---\n\n")
-            f.write(content.strip())
-        print(f"✅ Artikel disimpan: {path}")
-    except Exception as e:
-        print(f"Gagal simpan markdown: {e}")
+# === Ambil feed RSS ===
+feed = feedparser.parse(RSS_FEED_URL)
 
-# Fungsi utama
-def main():
-    print("📥 Memproses RSS ScienceDaily...")
-    feed = feedparser.parse("https://www.sciencedaily.com/rss/top/environment.xml")
+for entry in feed.entries[:3]:  # Ambil 3 artikel pertama
+    title = entry.title
+    slug = slugify(title)
+    link = entry.link
+    published = entry.published if 'published' in entry else datetime.utcnow().isoformat()
+    date = datetime.strptime(published, '%a, %d %b %Y %H:%M:%S %Z').strftime('%Y-%m-%d')
 
-    if not feed.entries:
-        print("❌ Tidak ada entri dalam feed.")
-        return
+    # Ambil konten
+    html = requests.get(link).text
+    soup = BeautifulSoup(html, "html.parser")
+    paragraphs = soup.find_all("p")
+    content = "\n".join([p.get_text() for p in paragraphs])
 
-    # Ambil hanya 1 artikel terbaru
-    article = feed.entries[0]
-    title = article.title
-    summary = article.summary
-    link = article.link
+    if len(content) < 500:
+        continue
 
-    print(f"📰 Artikel: {title}")
-    print(f"🔗 Link: {link}")
+    rewritten = rewrite_article(content)
 
-    full_text = fetch_article(link)
-    if not full_text:
-        print("❌ Gagal ambil isi lengkap artikel.")
-        return
+    # Ekstrak caption dari hasil rewrite
+    caption_match = re.search(r"keterangan gambar yang dibuat oleh Fungsi rewrite.*?\: (.+?)\n", rewritten, re.IGNORECASE)
+    caption = caption_match.group(1) if caption_match else title
 
-    translated = translate_and_rewrite(full_text)
-    if not translated:
-        print("❌ Gagal terjemahkan/rewrite artikel.")
-        return
+    image_url = generate_image(title, slug, caption)
 
-    save_as_markdown(title, summary, translated)
+    # Simpan file Markdown
+    post_path = f"{POST_DIR}/{slug}.md"
+    with open(post_path, "w") as f:
+        f.write(f"---\ntitle: \"{title}\"\ndate: {date}\ndraft: false\nsummary: \"{entry.summary}\"\nimage: {image_url}\n---\n\n")
+        f.write(rewritten)
 
-if __name__ == "__main__":
-    main()
+    print(f"Berhasil buat artikel: {title}")
