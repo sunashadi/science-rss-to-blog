@@ -1,0 +1,8 @@
+services:
+  - type: cron
+    name: ambil-artikel-sains
+    runtime: python
+    buildCommand: ""
+    startCommand: "python main.py"
+    schedule: "@daily"
+    plan: free
