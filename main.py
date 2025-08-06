@@ -1,134 +1,167 @@
 import os
-import feedparser
 import requests
-import openai
+import re
+import feedparser
 from bs4 import BeautifulSoup
-from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
-import re
+from datetime import datetime
+from dotenv import load_dotenv
 
-# === Konfigurasi ===
-RSS_FEED_URL = "https://www.sciencedaily.com/rss/all.xml"
-IMG_DIR = "static/images"
-POST_DIR = "content/posts"
-LEONARDO_API_KEY = os.getenv("LEONARDO_API_KEY")
+# Load environment variables
+load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai.api_key = OPENAI_API_KEY
+LEONARDO_API_KEY = os.getenv("LEONARDO_API_KEY")
 
-# === Persiapan direktori ===
-os.makedirs(IMG_DIR, exist_ok=True)
-os.makedirs(POST_DIR, exist_ok=True)
+def fetch_articles():
+    feed = feedparser.parse("https://www.sciencedaily.com/rss/top/science.xml")
+    articles = []
+    for entry in feed.entries[:1]:  # Ambil satu artikel terbaru
+        title = entry.title
+        url = entry.link
+        summary = BeautifulSoup(entry.summary, "html.parser").get_text()
+        articles.append({"title": title, "url": url, "summary": summary})
+    return articles
 
-# === Fungsi untuk membersihkan slug judul ===
-def slugify(text):
-    return re.sub(r'[^a-zA-Z0-9-]', '-', text.lower()).strip('-')
-
-# === Fungsi untuk rewrite artikel ===
-def rewrite_article(original_text):
+def rewrite_article(article):
     prompt = f"""
-    Tulis ulang artikel berikut ini dengan ketentuan:
-    
-    1. Artikel minimal 17 paragraf dalam bahasa Indonesia dengan gaya bahasa yang mudah dipahami oleh orang awam, cocok untuk pembaca blog (humanize) sesuai SEO!
-    2. Sesuaikan penulisan hurufnya sesuai Ejaan Yang Disempurnakan (EYD)!
-    3. Artikel menggunakan kalimat aktif dan pendek (maksimal 20 kata per kalimat).
-    4. Artikel paragraf tidak lebih dari 4 kalimat.
-    5. Artikel mengandung kata transisi seperti “selain itu”, “karena itu”, “di sisi lain”, “namun”, dan sejenisnya di seluruh artikel.
-    6. Artikel menghindari kalimat pasif secara berlebihan.
-    7. Artikel menjelaskan setiap istilah atau konsep sulit dengan cara sederhana.
-    8. Artikel mengandung struktur logis: pembuka, isi utama, dan penutup.
-    9. Tuliskan sumber jurnal dan tanggal publikasi dalam bentuk paragraf sesuai SEO! 
-    10. Artikel memiliki tulisan dengan gaya human-friendly, tidak kaku, seolah berbicara langsung kepada pembaca. 
-    11. Buatkan dalam bentuk paragraf! Buatkan judul yang menarik sesuai SEO! 
-    12. Buatkan 3 sub judul yang menarik dan relevan di dalam badan artikel yang dibuat sesuai SEO!
-    13. Buatkan Resume dan meta-deskripsi dalam kalimat pasif sesuai SEO! 
-    14. Tuliskan kalimat pendek yang lebih menarik daripada judul untuk keterangan gambar!  
-    15. Buatkan 5 frasa kata kunci utama yang unggul sesuai SEO!
+Tulis ulang artikel ilmiah ini ke dalam 17 paragraf dengan gaya populer yang mudah dipahami pembaca awam seperti blog. Gunakan bahasa Indonesia sesuai Ejaan yang Disempurnakan (EYD). Gunakan kalimat pendek dan aktif (maksimal 20 kata per kalimat). Jangan lebih dari 80 kata per paragraf.
 
-    Artikel:
-    {original_text}
-    """
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7
+Judul artikel: {article['title']}
+
+Ringkasan isi artikel:
+{article['summary']}
+
+Instruksi penulisan:
+1. Gunakan nada human-friendly dan tetap sesuai fakta ilmiah.
+2. Tambahkan transisi antarparagraf agar alur tulisan mengalir.
+3. Tambahkan analogi, perumpamaan, atau pertanyaan retoris jika relevan.
+4. Tambahkan penjelasan untuk istilah ilmiah sulit.
+5. Tidak menggunakan subjudul di tengah tulisan.
+6. Tambahkan 1 paragraf resume singkat di akhir.
+7. Tambahkan 1 kalimat meta-deskripsi pasif (maks. 150 karakter) untuk SEO.
+8. Tambahkan 5 frasa kata kunci utama yang relevan.
+9. Tambahkan 1 kalimat keterangan gambar yang lebih menarik dari judul.
+10. Tambahkan 1 kalimat caption gambar dalam format khusus:
+[[CAPTION]] Teks keterangan gambar di sini.
+11. Gunakan struktur: Judul, paragraf isi, lalu elemen SEO di akhir.
+12. Jangan menyebut nama situs atau sumber asli di teks.
+13. Gunakan gaya bertutur, tidak kaku.
+14. Buat seolah-olah ini ditulis oleh penulis blog.
+15. Gunakan gaya penyampaian populer yang mendorong pembaca paham topik ilmiah.
+16. Hindari kata-kata klise atau kalimat membosankan.
+
+Langsung mulai dengan judul, bukan pengantar!
+"""
+
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.7
+        }
     )
-    return response.choices[0].message.content.strip()
+    rewritten = response.json()["choices"][0]["message"]["content"]
+    return rewritten
 
-# === Fungsi buat gambar ilustrasi otomatis dari Leonardo + Logo + Caption ===
-def generate_image(prompt, slug, caption):
-    try:
-        # Request ke Leonardo
-        res = requests.post(
-            "https://cloud.leonardo.ai/api/rest/v1/generations",
-            headers={
-                "Authorization": f"Bearer {LEONARDO_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "prompt": prompt + ", modern, realistic, landscape",
-                "width": 1152,
-                "height": 768,
-                "num_images": 1,
-                "modelId": "realistic-vision-v5.1"
-            }
-        )
-        res.raise_for_status()
-        image_url = res.json()["generations_by_pk"]["generated_images"][0]["url"]
+def generate_image(title, caption):
+    prompt = f"Ilustrasi realistik modern tentang: {title}, gaya sinematik, HD, landscape, 1152x768"
 
-        # Download dan buka gambar
-        image_data = requests.get(image_url).content
-        image = Image.open(BytesIO(image_data)).convert("RGBA")
+    image_request = {
+        "prompt": prompt,
+        "modelId": "realistic-vision-v5.1",
+        "width": 1152,
+        "height": 768,
+        "num_images": 1,
+        "guidance_scale": 7,
+        "promptMagic": True
+    }
 
-        # Tambahkan logo
-        logo = Image.open(requests.get("https://i.imgur.com/SppIZHH.png", stream=True).raw).convert("RGBA")
-        logo = logo.resize((175, 158))
-        image.paste(logo, (image.width - logo.width - 20, image.height - logo.height - 20), logo)
+    response = requests.post(
+        "https://cloud.leonardo.ai/api/rest/v1/generations",
+        headers={
+            "Authorization": f"Bearer {LEONARDO_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json=image_request
+    )
 
-        # Tambahkan teks caption
-        draw = ImageDraw.Draw(image)
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
-        draw.text((30, image.height - 60), caption, font=font, fill="white")
+    data = response.json()
+    generation_id = data["sdGenerationJob"]["generationId"]
 
-        # Simpan
-        image_path = f"{IMG_DIR}/{slug}.png"
-        image.save(image_path, "PNG")
-        return f"/images/{slug}.png"
-    except Exception as e:
-        print(f"Gagal buat gambar: {e}")
-        return ""
+    # Polling until image is ready
+    image_url = None
+    while not image_url:
+        status = requests.get(
+            f"https://cloud.leonardo.ai/api/rest/v1/generations/{generation_id}",
+            headers={"Authorization": f"Bearer {LEONARDO_API_KEY}"}
+        ).json()
+        if status["generations_by_pk"]["status"] == "COMPLETE":
+            image_url = status["generations_by_pk"]["generated_images"][0]["url"]
 
-# === Ambil feed RSS ===
-feed = feedparser.parse(RSS_FEED_URL)
+    # Download image
+    img_data = requests.get(image_url).content
+    img = Image.open(BytesIO(img_data)).convert("RGB")
 
-for entry in feed.entries[:3]:  # Ambil 3 artikel pertama
-    title = entry.title
-    slug = slugify(title)
-    link = entry.link
-    published = entry.published if 'published' in entry else datetime.utcnow().isoformat()
-    date = datetime.strptime(published, '%a, %d %b %Y %H:%M:%S %Z').strftime('%Y-%m-%d')
+    # Tambahkan overlay caption
+    draw = ImageDraw.Draw(img)
+    font_path = os.path.join("assets", "fonts", "DejaVuSans-Bold.ttf")
+    font = ImageFont.truetype(font_path, 28)
 
-    # Ambil konten
-    html = requests.get(link).text
-    soup = BeautifulSoup(html, "html.parser")
-    paragraphs = soup.find_all("p")
-    content = "\n".join([p.get_text() for p in paragraphs])
+    text = caption
+    margin = 30
+    text_position = (margin, img.height - 60)
+    draw.text(text_position, text, font=font, fill="white")
 
-    if len(content) < 500:
-        continue
+    # Tambah logo
+    logo_path = os.path.join("assets", "logo.png")
+    if os.path.exists(logo_path):
+        logo = Image.open(logo_path).convert("RGBA")
+        logo = logo.resize((100, 100))
+        img.paste(logo, (img.width - 120, img.height - 120), logo)
 
-    rewritten = rewrite_article(content)
+    # Simpan gambar
+    filename = f"article-{datetime.now().strftime('%Y%m%d')}.jpg"
+    img.save(os.path.join("static", "images", filename))
+    return filename
 
-    # Ekstrak caption dari hasil rewrite
-    caption_match = re.search(r"keterangan gambar yang dibuat oleh Fungsi rewrite.*?\: (.+?)\n", rewritten, re.IGNORECASE)
-    caption = caption_match.group(1) if caption_match else title
+def save_to_markdown(content, image_filename):
+    today = datetime.now().strftime("%Y-%m-%d")
+    title_match = re.search(r"^(.+)", content)
+    title = title_match.group(1).strip() if title_match else "Artikel Sains"
+    filename = re.sub(r"[^a-zA-Z0-9]+", "-", title.lower()) + ".md"
 
-    image_url = generate_image(title, slug, caption)
+    image_path = f"/images/{image_filename}"
+    front_matter = f"""---
+title: "{title}"
+date: {today}
+categories: ["Ilmiah Populer"]
+image: "{image_path}"
+---
+"""
 
-    # Simpan file Markdown
-    post_path = f"{POST_DIR}/{slug}.md"
-    with open(post_path, "w") as f:
-        f.write(f"---\ntitle: \"{title}\"\ndate: {date}\ndraft: false\nsummary: \"{entry.summary}\"\nimage: {image_url}\n---\n\n")
-        f.write(rewritten)
+    with open(os.path.join("content", "posts", filename), "w", encoding="utf-8") as f:
+        f.write(front_matter + "\n" + content)
 
-    print(f"Berhasil buat artikel: {title}")
+def main():
+    articles = fetch_articles()
+    for article in articles:
+        rewritten = rewrite_article(article)
+
+        # Ekstrak caption dari tanda [[CAPTION]] di akhir
+        caption_match = re.search(r"\[\[CAPTION\]\]\s*(.+)", rewritten)
+        caption = caption_match.group(1).strip() if caption_match else article['title']
+
+        image_filename = generate_image(article["title"], caption)
+        save_to_markdown(rewritten, image_filename)
+        print(f"Artikel '{article['title']}' berhasil disimpan.")
+
+if __name__ == "__main__":
+    main()
