@@ -1,8 +1,4 @@
-services:
-  - type: cron
-    name: ambil-artikel-sains
-    runtime: python
-    buildCommand: ""
-    startCommand: "python main.py"
-    schedule: "@daily"
-    plan: free
+cron:
+  - name: run-every-4-hours
+    schedule: "0 */4 * * *"  # Setiap 4 jam, mulai dari jam 00:00 UTC
+    command: "python main.py"
