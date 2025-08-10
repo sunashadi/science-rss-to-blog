@@ -14,23 +14,52 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 LEONARDO_API_KEY = os.getenv("LEONARDO_API_KEY")
 
 def fetch_articles():
+    """
+    Ambil daftar artikel terbaru dari RSS ScienceDaily
+    """
     feed = feedparser.parse("https://www.sciencedaily.com/rss/top/science.xml")
     articles = []
     for entry in feed.entries[:1]:  # Ambil satu artikel terbaru
         title = entry.title
         url = entry.link
+        # Ambil ringkasan dari RSS hanya sebagai fallback
         summary = BeautifulSoup(entry.summary, "html.parser").get_text()
         articles.append({"title": title, "url": url, "summary": summary})
     return articles
 
+def fetch_full_article(url):
+    """
+    Scrap isi artikel penuh dari ScienceDaily.
+    Cari di <div id="story_text"> atau <div id="text">
+    """
+    try:
+        html = requests.get(url, timeout=10).text
+        soup = BeautifulSoup(html, "html.parser")
+
+        body_div = soup.find("div", {"id": "story_text"}) or soup.find("div", {"id": "text"})
+        if not body_div:
+            return None  # fallback nanti ke summary
+
+        # Ambil semua paragraf
+        paragraphs = [p.get_text(strip=True) for p in body_div.find_all("p")]
+        full_text = "\n\n".join([p for p in paragraphs if p])
+        return full_text.strip()
+
+    except Exception as e:
+        print(f"❌ Gagal mengambil artikel penuh: {e}")
+        return None
+
 def rewrite_article(article):
+    """
+    Kirim teks artikel ke OpenAI untuk ditulis ulang
+    """
     prompt = f"""
 Tulis ulang artikel ilmiah ini ke dalam 17 paragraf dengan gaya populer yang mudah dipahami pembaca awam seperti blog. Gunakan bahasa Indonesia sesuai Ejaan yang Disempurnakan (EYD). Gunakan kalimat pendek dan aktif (maksimal 20 kata per kalimat). Jangan lebih dari 80 kata per paragraf.
 
 Judul artikel: {article['title']}
 
-Ringkasan isi artikel:
-{article['summary']}
+Isi artikel:
+{article['content']}
 
 Instruksi penulisan:
 1. Gunakan nada human-friendly dan tetap sesuai fakta ilmiah.
@@ -72,6 +101,9 @@ Langsung mulai dengan judul, bukan pengantar!
     return rewritten
 
 def generate_image(title, caption):
+    """
+    Buat ilustrasi artikel menggunakan Leonardo AI dan tambahkan caption + logo
+    """
     prompt = f"Ilustrasi realistik modern tentang: {title}, gaya sinematik, HD, landscape, 1152x768"
 
     image_request = {
@@ -96,7 +128,7 @@ def generate_image(title, caption):
     data = response.json()
     generation_id = data["sdGenerationJob"]["generationId"]
 
-    # Polling until image is ready
+    # Polling sampai gambar jadi
     image_url = None
     while not image_url:
         status = requests.get(
@@ -115,10 +147,9 @@ def generate_image(title, caption):
     font_path = os.path.join("assets", "fonts", "DejaVuSans-Bold.ttf")
     font = ImageFont.truetype(font_path, 28)
 
-    text = caption
     margin = 30
     text_position = (margin, img.height - 60)
-    draw.text(text_position, text, font=font, fill="white")
+    draw.text(text_position, caption, font=font, fill="white")
 
     # Tambah logo
     logo_path = os.path.join("assets", "logo.png")
@@ -133,6 +164,9 @@ def generate_image(title, caption):
     return filename
 
 def save_to_markdown(content, image_filename):
+    """
+    Simpan artikel ke format Markdown
+    """
     today = datetime.now().strftime("%Y-%m-%d")
     title_match = re.search(r"^(.+)", content)
     title = title_match.group(1).strip() if title_match else "Artikel Sains"
@@ -153,6 +187,13 @@ image: "{image_path}"
 def main():
     articles = fetch_articles()
     for article in articles:
+        full_text = fetch_full_article(article["url"])
+        if not full_text:
+            print(f"⚠️ Menggunakan ringkasan karena gagal ambil penuh: {article['url']}")
+            article["content"] = article["summary"]
+        else:
+            article["content"] = full_text
+
         rewritten = rewrite_article(article)
 
         # Ekstrak caption dari tanda [[CAPTION]] di akhir
@@ -161,7 +202,7 @@ def main():
 
         image_filename = generate_image(article["title"], caption)
         save_to_markdown(rewritten, image_filename)
-        print(f"Artikel '{article['title']}' berhasil disimpan.")
+        print(f"✅ Artikel '{article['title']}' berhasil disimpan.")
 
 if __name__ == "__main__":
     main()
